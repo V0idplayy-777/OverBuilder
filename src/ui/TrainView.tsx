@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Activity, Gauge, Sigma, Timer, TrendingDown, Waves } from "lucide-react";
 import type { EngineState } from "../engine";
 import { LossChart } from "./LossChart";
 
-function Stat(props: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
+function Stat(props: { icon: ReactNode; label: string; value: string; sub?: string }) {
   return (
     <div className="card px-3 py-2.5 min-w-0">
       <div className="flex items-center gap-1.5 text-dim">
