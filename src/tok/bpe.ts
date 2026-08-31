@@ -148,7 +148,6 @@ export class BPETokenizer {
     }
 
     // --- final id tables
-    this.idToToken = [...SPECIALS, ...this.chars.map((c) => (c === " " ? "·" : c) === "·" && false ? c : c)];
     this.idToToken = [...SPECIALS, ...this.chars];
     for (const [a, b] of this.merges) this.idToToken.push(a + b);
     this.tokenToId = new Map(this.idToToken.map((t, i) => [t, i]));
