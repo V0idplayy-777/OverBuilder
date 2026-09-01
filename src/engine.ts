@@ -2,7 +2,7 @@
 // training loop, sampling, chat, and checkpointing. React subscribes to
 // snapshots via useSyncExternalStore.
 
-import { initKernels } from "./nn/kernels";
+import { initKernels, kernelError } from "./nn/kernels";
 import { GPT, sampleNext } from "./nn/model";
 import { MODELS, paramCount, type ModelSpec } from "./nn/configs";
 import { BPETokenizer, TOK } from "./tok/bpe";
@@ -142,7 +142,8 @@ class Engine {
   async init() {
     const kernel = await initKernels();
     this.set({ kernel });
-    this.log(`kernels: ${kernel === "wasm" ? "webassembly (compiled from wat at boot)" : "javascript fallback"}`);
+    this.log(kernel === "wasm" ? "kernels: wasm" : "kernels: javascript fallback");
+    if (kernelError) this.log("wasm error: " + kernelError);
     await this.rebuildData();
     await this.rebuildModel();
   }
