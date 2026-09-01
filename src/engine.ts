@@ -302,7 +302,7 @@ class Engine {
         };
         stepsInSlice++;
         tokensInSlice += T;
-      } while (performance.now() - sliceStart < 13);
+      } while (performance.now() - sliceStart < 28);
 
       const sliceMs = Math.max(0.5, performance.now() - sliceStart);
       const tps = (tokensInSlice / sliceMs) * 1000;
