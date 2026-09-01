@@ -74,7 +74,7 @@ function linear(tape: Tape, x: Tensor, w: Param, T: number, outDim: number, inDi
   matNT(x.d, w.d, out.d, T, outDim, inDim, 0); // y = x w^T
   tape.push(() => {
     const dy = out.g!;
-    const dyT = new Float32Array(dy.length);
+    const dyT = f32(dy.length);
     transpose(dy, dyT, T, outDim);
     matNN(dyT, x.d, w.g, outDim, inDim, T, 1);  // dW += dy^T x
     matNN(dy, w.d, need(x), T, inDim, outDim, 1); // dX += dy W
@@ -278,6 +278,7 @@ export class GPT {
 
   // forward + backward for one window of ids (length T+1), returns mean loss
   trainStep(ids: Uint32Array | number[], T: number): number {
+    ap = 0;
     const d = this.d;
     const tape: Tape = [];
     // embedding gather
