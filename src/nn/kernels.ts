@@ -3,8 +3,6 @@
 // in the browser at startup). If the WAT toolchain can't load (offline, CSP),
 // we transparently fall back to equivalent typed-array JS kernels.
 
-import { WAT_SOURCE } from "./wat";
-
 export type KernelMode = "boot" | "wasm" | "js";
 
 let mode: KernelMode = "boot";
@@ -106,31 +104,21 @@ function dispatch(nt: MatFn, nn: MatFn): { nt: MatFn; nn: MatFn } {
 export let matNT: MatFn = jsNT;
 export let matNN: MatFn = jsNN;
 
-async function tryLoadWabt(): Promise<any> {
-  // Path 1: bundled wabt package (works offline).
-  try {
-    const m: any = await import("wabt");
-    const factory = m.default ?? m;
-    return await factory();
-  } catch {
-    // Path 2: CDN (keeps working even if bundling fails).
-    // @ts-ignore runtime-only URL import
-    const m: any = await import(/* @vite-ignore */ "https://esm.sh/wabt@1.0.36?bundle");
-    const factory = m.default ?? m;
-    return await factory();
-  }
+const WASM_B64 = "AGFzbQEAAAABCwFgB39/f39/f38AAwMCAAAFBgEBYICAAQcgAwZtZW1vcnkCAAhzZ2VtbV9udAAACHNnZW1tX25uAAEKzggC7AQCDH8PfSAGsiETIAVBAnQhESAEQQJ0IRJBACEHA0AgACAHIBFsaiEKIAogEWohC0EAIQgDQCACIAcgBGwgCGpBAnRqIRAgEyAQKgIAlCEaIBMgEEEEaioCAJQhGyATIBBBCGoqAgCUIRwgEyAQQQxqKgIAlCEdIBMgECASaioCAJQhHiATIBAgEkEEamoqAgCUIR8gEyAQIBJBCGpqKgIAlCEgIBMgECASQQxqaioCAJQhISABIAggEWxqIQwgDCARaiENIA0gEWohDiAOIBFqIQ9BACEJA0AgCioCACEUIApBBGoqAgAhFSALKgIAIRYgC0EEaioCACEXIAwqAgAhGCAMQQRqKgIAIRkgGiAUIBiUIBUgGZSSkiEaIB4gFiAYlCAXIBmUkpIhHiANKgIAIRggDUEEaioCACEZIBsgFCAYlCAVIBmUkpIhGyAfIBYgGJQgFyAZlJKSIR8gDioCACEYIA5BBGoqAgAhGSAcIBQgGJQgFSAZlJKSIRwgICAWIBiUIBcgGZSSkiEgIA8qAgAhGCAPQQRqKgIAIRkgHSAUIBiUIBUgGZSSkiEdICEgFiAYlCAXIBmUkpIhISAKQQhqIQogC0EIaiELIAxBCGohDCANQQhqIQ0gDkEIaiEOIA9BCGohDyAJQQJqIQkgCSAFSQ0ACyAQIBo4AgAgEEEEaiAbOAIAIBBBCGogHDgCACAQQQxqIB04AgAgECASaiAeOAIAIBAgEkEEamogHzgCACAQIBJBCGpqICA4AgAgECASQQxqaiAhOAIAIAhBBGohCCAIIARJDQALIAdBAmohByAHIANJDQALC90DAgl/D30gBrIhECAFQQJ0IQ4gBEECdCEPQQAhBwNAIAAgByAObGohCiAKIA5qIQtBACEIA0AgAiAHIARsIAhqQQJ0aiENIBAgDSoCAJQhFyAQIA1BBGoqAgCUIRggECANQQhqKgIAlCEZIBAgDUEMaioCAJQhGiAQIA0gD2oqAgCUIRsgECANIA9BBGpqKgIAlCEcIBAgDSAPQQhqaioCAJQhHSAQIA0gD0EMamoqAgCUIR4gASAIQQJ0aiEMQQAhCQNAIAogCUECdGoqAgAhESALIAlBAnRqKgIAIRIgDCoCACETIAxBBGoqAgAhFCAMQQhqKgIAIRUgDEEMaioCACEWIBcgESATlJIhFyAYIBEgFJSSIRggGSARIBWUkiEZIBogESAWlJIhGiAbIBIgE5SSIRsgHCASIBSUkiEcIB0gEiAVlJIhHSAeIBIgFpSSIR4gDCAPaiEMIAlBAWohCSAJIAVJDQALIA0gFzgCACANQQRqIBg4AgAgDUEIaiAZOAIAIA1BDGogGjgCACANIA9qIBs4AgAgDSAPQQRqaiAcOAIAIA0gD0EIamogHTgCACANIA9BDGpqIB44AgAgCEEEaiEIIAggBEkNAAsgB0ECaiEHIAcgA0kNAAsL";
+
+function b64ToBuf(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
 }
 
 export async function initKernels(): Promise<KernelMode> {
   try {
-    const wabt = await tryLoadWabt();
-    const parsed = wabt.parseWat("kernels.wat", WAT_SOURCE, {});
-    const bin = parsed.toBinary({ log: false, write_debug_names: false }).buffer as ArrayBuffer;
+    const bin = b64ToBuf(WASM_B64);
     const { instance } = await WebAssembly.instantiate(bin, {});
     const ex: any = instance.exports;
     wasm = { mem: ex.memory, nt: ex.sgemm_nt, nn: ex.sgemm_nn };
-
-    // numerical self-test against the JS reference before trusting it
     const M = 8, N = 12, K = 16;
     const rnd = (n: number) => Float32Array.from({ length: n }, () => Math.random() * 2 - 1);
     const a = rnd(M * K), b = rnd(N * K), bT = rnd(K * N);
@@ -143,7 +131,6 @@ export async function initKernels(): Promise<KernelMode> {
     runWasm("nn", a, bT as Float32Array, d2, M, N, K, 0);
     let dd = 0; for (let i = 0; i < d1.length; i++) dd = Math.max(dd, Math.abs(d1[i] - d2[i]));
     if (d > 1e-4 || dd > 1e-4) throw new Error("wasm self-test failed");
-
     const fns = dispatch(jsNT, jsNN);
     matNT = fns.nt; matNN = fns.nn;
     mode = "wasm";
@@ -154,6 +141,7 @@ export async function initKernels(): Promise<KernelMode> {
     mode = "js";
   }
   return mode;
+}
 }
 
 // matrix-vector product for single-token decode (memory-bound; JS is ideal)
