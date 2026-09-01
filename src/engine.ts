@@ -2,11 +2,11 @@
 // training loop, sampling, chat, and checkpointing. React subscribes to
 // snapshots via useSyncExternalStore.
 
-import { initKernels } from "./kernels";
-import { GPT, sampleNext } from "./model";
-import { MODELS, paramCount, type ModelSpec } from "./configs";
-import { BPETokenizer, TOK } from "./bpe";
-import { getDataset, getDatasets } from "./corpus";
+import { initKernels } from "./nn/kernels";
+import { GPT, sampleNext } from "./nn/model";
+import { MODELS, paramCount, type ModelSpec } from "./nn/configs";
+import { BPETokenizer, TOK } from "./tok/bpe";
+import { getDataset, getDatasets } from "./data/corpus";
 
 export type Status = "idle" | "preparing" | "training" | "paused" | "done" | "error";
 export type ChatMsg = { role: "u" | "b"; text: string };
@@ -50,6 +50,8 @@ export interface EngineState {
 }
 
 const SPEC: Record<string, ModelSpec> = Object.fromEntries(MODELS.map((m) => [m.id, m]));
+const SPECIAL_RE = /(<\|user\|>|<\|bot\|>|<\|end\|>)/;
+const SPECIAL_ID: Record<string, number> = { "<|user|>": TOK.user, "<|bot|>": TOK.bot, "<|end|>": TOK.end };
 
 class Engine {
   state: EngineState = {
@@ -103,83 +105,95 @@ class Engine {
     return () => this.listeners.delete(fn);
   };
   getSnapshot = () => this.state;
-  private emit(patch?: Partial<EngineState>) {
-    if (patch) this.state = { ...this.state, ...patch };
-    else this.state = { ...this.state };
+  private emit() {
+    this.state = { ...this.state };
+    this.listeners.forEach((f) => f());
+  }
+  private set(patch: Partial<EngineState>) {
+    this.state = { ...this.state, ...patch };
     this.listeners.forEach((f) => f());
   }
 
   log(msg: string) {
-    const line = msg;
-    const logs = [...this.state.logs, line];
+    const logs = [...this.state.logs, msg];
     if (logs.length > 400) logs.splice(0, logs.length - 400);
     this.state = { ...this.state, logs };
+    this.listeners.forEach((f) => f());
   }
 
   spec(): ModelSpec {
     return SPEC[this.state.modelId];
   }
 
+  // encode text, splicing real special-token ids in place of their markers
+  private encodeSmart(text: string, cap: number): number[] {
+    const out: number[] = [];
+    for (const part of text.split(SPECIAL_RE)) {
+      if (!part) continue;
+      const sid = SPECIAL_ID[part];
+      if (sid !== undefined) out.push(sid);
+      else out.push(...this.tokenizer.encode(part, cap));
+    }
+    return out;
+  }
+
   // ------------------------------------------------------------ boot
 
   async init() {
     const kernel = await initKernels();
-    this.emit({ kernel });
-    this.log(`kernels: ${kernel === "wasm" ? "WebAssembly (compiled from WAT at boot)" : "javascript fallback"}`);
-    await this.rebuildData(false);
+    this.set({ kernel });
+    this.log(`kernels: ${kernel === "wasm" ? "webassembly (compiled from wat at boot)" : "javascript fallback"}`);
+    await this.rebuildData();
+    await this.rebuildModel();
   }
 
-  private async rebuildData(rerunModel = true) {
+  private async rebuildData() {
     const ds = getDataset(this.state.datasetId);
-    this.emit({ status: "preparing", statusText: "training tokenizer", dataReady: false });
+    this.set({ status: "preparing", statusText: "training tokenizer", dataReady: false });
     const maxMerges = Math.max(...MODELS.map((m) => m.vocabCap)) + 64;
     await this.tokenizer.train(ds.text, maxMerges, (done, total) =>
-      this.emit({ statusText: `training tokenizer — merge ${done}/${total}` })
+      this.set({ statusText: `training tokenizer — merge ${done}/${total}` })
     );
     this.encodeCache.clear();
-    this.emit({ corpusChars: ds.text.length, mergeCount: this.tokenizer.merges.length, dataReady: true, status: "idle", statusText: "ready" });
-    this.log(`tokenizer: ${this.tokenizer.merges.length} bpe merges on ${(ds.text.length / 1024).toFixed(0)} kb of ${ds.name.toLowerCase()}`);
-    if (rerunModel) await this.recap();
-    else await this.rebuildModel();
+    this.set({ corpusChars: ds.text.length, mergeCount: this.tokenizer.merges.length, dataReady: true });
+    this.log(`tokenizer: ${this.tokenizer.merges.length} bpe merges over ${(ds.text.length / 1024).toFixed(0)} kb — ${ds.name.toLowerCase()}`);
   }
 
   private capMerges(spec: ModelSpec): number {
-    // choose merge cap so total vocab is a multiple of 4 (kernel tiling)
     let cap = spec.vocabCap;
-    while ((this.tokenizer.vocabSize(cap) % 4) !== 0 && cap > 0) cap--;
+    while (this.tokenizer.vocabSize(cap) % 4 !== 0 && cap > 0) cap--;
     return Math.min(cap, this.tokenizer.merges.length);
   }
 
-  private async recap() {
+  private async recap(): Promise<number> {
     const spec = this.spec();
     const cap = this.capMerges(spec);
-    this.emit({ statusText: "encoding corpus", status: "preparing" });
+    this.set({ statusText: "encoding corpus", status: "preparing" });
+    await new Promise((r) => setTimeout(r, 0));
     const key = `${this.state.datasetId}:${cap}`;
     let ids = this.encodeCache.get(key);
     if (!ids) {
       const ds = getDataset(this.state.datasetId);
-      await new Promise((r) => setTimeout(r, 0));
-      ids = Uint32Array.from(this.tokenizer.encode(ds.text, cap));
+      ids = Uint32Array.from(this.encodeSmart(ds.text, cap));
       this.encodeCache.set(key, ids);
     }
     this.ids = ids;
     const vocab = this.tokenizer.vocabSize(cap);
-    this.emit({ corpusTokens: ids.length, vocabSize: vocab });
-    this.log(`corpus: ${ids.length.toLocaleString()} tokens (vocab ${vocab})`);
+    this.set({ corpusTokens: ids.length, vocabSize: vocab });
+    this.log(`corpus: ${ids.length.toLocaleString()} tokens, vocab ${vocab.toLocaleString()}`);
+    return vocab;
   }
 
   async rebuildModel() {
     const spec = this.spec();
-    const cap = this.capMerges(spec);
-    this.emit({ status: "preparing", statusText: "encoding corpus", modelReady: false });
-    await this.recap();
-    this.emit({ statusText: "initializing weights" });
-    await new Promise((r) => setTimeout(r, 0));
-    this.model = new GPT(spec, this.tokenizer.vocabSize(cap));
     this.runId++;
-    const params = paramCount(spec, this.tokenizer.vocabSize(cap));
-    this.state = {
-      ...this.state,
+    this.set({ status: "preparing", modelReady: false });
+    const vocab = await this.recap();
+    this.set({ statusText: "initializing weights" });
+    await new Promise((r) => setTimeout(r, 0));
+    this.model = new GPT(spec, vocab);
+    const params = paramCount(spec, vocab);
+    this.set({
       params,
       step: 0,
       totalSteps: spec.steps,
@@ -195,31 +209,31 @@ class Engine {
       statusText: "ready",
       modelReady: true,
       msPerStep: 0,
-    };
-    this.emit();
+      tokPerSec: 0,
+    });
     this.log(
-      `model "${spec.name.toLowerCase()}": ${params.toLocaleString()} params — d=${spec.d}, ${spec.layers} layers, ${spec.heads} heads, ctx ${spec.ctx}`
+      `model "${spec.name.toLowerCase()}": ${params.toLocaleString()} params — d=${spec.d}, ${spec.layers} layers × ${spec.heads} heads, ctx ${spec.ctx}, vocab ${vocab}`
     );
   }
 
   async selectModel(id: string) {
     if (id === this.state.modelId && this.model) return;
     this.runId++;
-    this.emit({ modelId: id });
+    this.set({ modelId: id });
     await this.rebuildModel();
   }
 
   async selectDataset(id: string) {
     if (id === this.state.datasetId) return;
     this.runId++;
-    this.emit({ datasetId: id });
-    await this.rebuildData(true);
+    this.set({ datasetId: id });
+    await this.rebuildData();
     await this.rebuildModel();
   }
 
-  set(patch: Partial<EngineState>) {
-    this.runId++;
-    this.emit(patch);
+  // live-applies hyperparameters / sampling settings without interrupting a run
+  update(patch: Partial<EngineState>) {
+    this.set(patch);
   }
 
   // ------------------------------------------------------------ training
@@ -237,20 +251,21 @@ class Engine {
     const spec = this.spec();
     if (spec.heavy && this.state.step === 0) {
       const ok = window.confirm(
-        `${spec.name} is ~${(this.state.params / 1e6).toFixed(0)}M parameters.\n\nThat means roughly ${(this.state.params * 16 / 1e9).toFixed(1)} GB of RAM for training state and seconds per step. Continue?`
+        `${spec.name} is ~${(this.state.params / 1e6).toFixed(0)}M parameters.\n\nThat's roughly ${((this.state.params * 16) / 1e9).toFixed(1)} GB of RAM for optimizer state, and seconds (not milliseconds) per step. Continue?`
       );
       if (!ok) return;
     }
     if (this.state.status === "training") return;
     const runId = ++this.runId;
     const total = this.state.totalSteps;
-    if (this.state.step >= total) this.state = { ...this.state, step: 0, lossSeries: [] };
-    this.emit({ status: "training", statusText: "training" });
-    if (this.state.step === 0) {
-      this.log(`training: ${total.toLocaleString()} steps, ctx ${this.state.trainCtx}, peak lr ${spec.lr}`);
-    } else {
-      this.log(`resuming at step ${this.state.step}`);
-    }
+    if (this.state.step >= total) this.set({ step: 0, lossSeries: [] });
+    const fresh = this.state.step === 0;
+    this.set({ status: "training", statusText: "training" });
+    this.log(
+      fresh
+        ? `training: ${total.toLocaleString()} steps · ctx ${this.state.trainCtx} · peak lr ${spec.lr} · adamw + cosine`
+        : `resuming at step ${this.state.step}`
+    );
 
     let lastLog = this.state.step;
     while (this.runId === runId && this.state.step < total) {
@@ -260,12 +275,16 @@ class Engine {
       do {
         const T = this.state.trainCtx;
         const stream = this.ids;
-        if (stream.length < T + 2) { this.log("corpus too small for context length"); this.emit({ status: "error" }); return; }
+        if (stream.length < T + 2) {
+          this.log("corpus too small for this context length");
+          this.set({ status: "error" });
+          return;
+        }
         const off = Math.floor(Math.random() * (stream.length - T - 1));
-        const ids = stream.subarray(off, off + T + 1);
+        const window = stream.subarray(off, off + T + 1);
         const lr = this.lrAt(this.state.step, total);
         this.model!.zeroGrads();
-        const loss = this.model!.trainStep(ids as unknown as Uint32Array, T);
+        const loss = this.model!.trainStep(window as Uint32Array, T);
         const gnorm = this.model!.clipGrads(1.0);
         this.model!.adamw(lr, 0.1);
         const ema = isNaN(this.state.loss) ? loss : this.state.loss * 0.98 + loss * 0.02;
@@ -287,40 +306,37 @@ class Engine {
 
       const sliceMs = Math.max(0.5, performance.now() - sliceStart);
       const tps = (tokensInSlice / sliceMs) * 1000;
-      this.state = { ...this.state, tokPerSec: this.state.tokPerSec ? this.state.tokPerSec * 0.8 + tps * 0.2 : tps, msPerStep: sliceMs / stepsInSlice };
-      this.emit({
-        step: this.state.step, loss: this.state.loss, lossSeries: this.state.lossSeries,
-        tokensSeen: this.state.tokensSeen, gnorm: this.state.gnorm, lr: this.state.lr,
-        tokPerSec: this.state.tokPerSec, msPerStep: this.state.msPerStep,
-      });
+      this.state = {
+        ...this.state,
+        tokPerSec: this.state.tokPerSec ? this.state.tokPerSec * 0.8 + tps * 0.2 : tps,
+        msPerStep: sliceMs / stepsInSlice,
+      };
       this.emit();
       await new Promise((r) => setTimeout(r, 0));
+      if (this.runId !== runId) return;
 
-      if (this.state.step % this.state.sampleEvery === 0 && this.runId === runId) {
+      if (this.state.step % this.state.sampleEvery === 0) {
         await this.preview();
+        if (this.runId !== runId) return;
       }
       if (this.state.step - lastLog >= Math.max(50, Math.floor(total / 40))) {
         lastLog = this.state.step;
         this.log(
           `step ${this.state.step}/${total} — loss ${this.state.loss.toFixed(3)} · ${fmtNum(this.state.tokPerSec)} tok/s · lr ${this.state.lr.toExponential(1)} · gnorm ${this.state.gnorm.toFixed(2)}`
         );
-        this.emit();
       }
     }
-    if (this.runId !== runId) return;
     if (this.state.step >= total) {
       await this.preview();
-      this.emit({ status: "done", statusText: "training complete", trained: true });
+      this.set({ status: "done", statusText: "training complete", trained: true });
       this.log(`done — final loss ${this.state.loss.toFixed(3)} over ${this.state.tokensSeen.toLocaleString()} tokens. head to the chat tab.`);
-      this.emit();
     }
   }
 
   pause() {
     this.runId++;
-    this.emit({ status: "paused", statusText: "paused", trained: this.state.step > 0 });
+    this.set({ status: "paused", statusText: "paused", trained: this.state.step > 0 });
     this.log(`paused at step ${this.state.step}`);
-    this.emit();
   }
 
   async resetTraining() {
@@ -332,73 +348,69 @@ class Engine {
   private async preview() {
     if (!this.model) return;
     const cap = this.capMerges(this.spec());
-    const prompt = `${TOK_USER} hello, how are you?\n${TOK_BOT}`;
-    const ids = this.tokenizer.encode(prompt, cap);
+    const ids = this.encodeSmart("<|user|> hello, how are you?\n<|bot|>", cap);
     const out: number[] = [];
     const cache = this.model.createCache();
     const seen = new Set<number>();
-    const budget = Math.min(this.spec().ctx - 1, ids.length + 36);
-    let cur: number[] = ids.slice(-budget);
-    for (const id of cur) { this.model.stepToken(id, cache); seen.add(id); }
-    let next = sampleNext(this.model.stepToken(cur[cur.length - 1], newCacheWrap(cache)), seen, 0.8, 40, 0.95, 1.1);
-    // note: stepToken call above advanced once more than needed; recompute simply below
-    for (let i = 0; i < 36; i++) {
+    let logits: Float32Array | null = null;
+    for (const id of ids) {
+      if (cache.pos >= this.spec().ctx - 2) break;
+      logits = this.model.stepToken(id, cache);
+      seen.add(id);
+    }
+    for (let i = 0; i < 36 && logits; i++) {
+      const next = sampleNext(logits, seen, 0.8, 40, 0.95, 1.1);
       if (this.stops.has(next)) break;
       out.push(next);
       seen.add(next);
-      if (cache.pos >= this.spec().ctx - 1) break;
-      next = sampleNext(this.model.stepToken(next, cache), seen, 0.8, 40, 0.95, 1.1);
-      await new Promise((r) => setTimeout(r, 0));
+      if (cache.pos >= this.spec().ctx - 2) break;
+      logits = this.model.stepToken(next, cache);
     }
     const text = this.tokenizer.decode(out).trim();
     this.state = { ...this.state, sample: text, sampleAt: this.state.step, trained: this.state.step > 0 };
-    this.log(`sample @${this.state.step}: "${text.slice(0, 80)}${text.length > 80 ? "…" : ""}"`);
+    if (this.state.step % (this.state.sampleEvery * 5) === 0 && text) {
+      this.log(`sample @${this.state.step}: "${text.slice(0, 90)}${text.length > 90 ? "…" : ""}"`);
+    }
     this.emit();
   }
 
   // ------------------------------------------------------------ chat
 
   async chat(userText: string) {
-    if (!this.model || this.state.step === 0) return;
-    if (this.state.generating) return;
-    this.runId++; // stop training preview etc if any
+    if (!this.model || this.state.step === 0 || this.state.generating) return;
+    const wasTraining = this.state.status === "training";
+    this.runId++;
     const runId = this.runId;
     const spec = this.spec();
     const cap = this.capMerges(spec);
-    const chats: ChatMsg[] = [...this.state.chats, { role: "u", text: userText }, { role: "b", text: "" }];
-    this.emit({ chats, generating: true, status: this.state.status === "training" ? "paused" : this.state.status });
+    const base: ChatMsg[] = [...this.state.chats, { role: "u", text: userText }];
+    this.set({ chats: [...base, { role: "b", text: "" }], generating: true, status: wasTraining ? "paused" : this.state.status });
 
-    // build prompt from history, most recent first
-    let promptIds: number[] = [];
-    const addTurn = (u: string, b?: string) => {
-      const turn = this.tokenizer.encode(`${TOK_USER} ${u}\n${TOK_BOT} ${b ?? ""}`, cap);
-      promptIds = b === undefined ? promptIds.concat(turn) : turn.concat(this.tokenizer.encode(` ${TOK_END}`, cap), promptIds);
-    };
-    // append newest last
-    const hist = chats.slice(0, -1);
-    promptIds = this.tokenizer.encode(`${TOK_USER} ${userText}\n${TOK_BOT}`, cap);
-    for (let i = hist.length - 2; i >= 0; i--) {
+    // prompt: newest message last, older turns prepended while they fit
+    let promptIds = this.encodeSmart(`<|user|> ${userText}\n<|bot|>`, cap);
+    const hist = base.slice(0, -1);
+    for (let i = hist.length - 1; i >= 0; i--) {
       const m = hist[i];
-      const turnIds = this.tokenizer.encode(
-        m.role === "u" ? `${TOK_USER} ${m.text}\n` : `${TOK_BOT} ${m.text} ${TOK_END}\n`,
+      const turn = this.encodeSmart(
+        m.role === "u" ? `<|user|> ${m.text}\n` : `<|bot|> ${m.text} <|end|>\n`,
         cap
       );
-      const next = [...turnIds, ...promptIds];
-      if (next.length > spec.ctx - this.state.maxNew - 4) break;
-      promptIds = next;
+      const joined = [...turn, ...promptIds];
+      if (joined.length > spec.ctx - this.state.maxNew - 4) break;
+      promptIds = joined;
     }
 
     const cache = this.model.createCache();
     const seen = new Set<number>();
+    let logits: Float32Array | null = null;
     for (const id of promptIds) {
       if (cache.pos >= spec.ctx - 2) break;
-      this.model.stepToken(id, cache);
+      logits = this.model.stepToken(id, cache);
       seen.add(id);
     }
-    let logits = this.model.stepToken(promptIds[promptIds.length - 1] ?? TOK.bot, newCacheWrap(cache));
     const gen: number[] = [];
     const t0 = performance.now();
-    for (let i = 0; i < this.state.maxNew; i++) {
+    for (let i = 0; i < this.state.maxNew && logits; i++) {
       if (runId !== this.runId) break;
       const next = sampleNext(logits, seen, this.state.temp, this.state.topK, this.state.topP, this.state.repPen);
       if (this.stops.has(next)) break;
@@ -407,36 +419,33 @@ class Engine {
       seen.add(next);
       logits = this.model.stepToken(next, cache);
       const text = this.tokenizer.decode(gen).trim();
-      const cc = [...chats.slice(0, -1), { role: "b" as const, text }];
-      this.emit({ chats: cc });
+      this.set({ chats: [...base, { role: "b", text }] });
       await new Promise((r) => setTimeout(r, 0));
     }
-    const dt = performance.now() - t0;
-    if (gen.length > 0) {
-      this.log(`generated ${gen.length} tokens in ${(dt / 1000).toFixed(1)}s (${(gen.length / (dt / 1000)).toFixed(1)} tok/s)`);
-    }
+    const dt = (performance.now() - t0) / 1000;
+    if (gen.length > 1) this.log(`generated ${gen.length} tokens in ${dt.toFixed(1)}s (${(gen.length / dt).toFixed(1)} tok/s)`);
     const finalChats = [...this.state.chats];
-    if (finalChats.length && finalChats[finalChats.length - 1].role === "b") {
-      const t = finalChats[finalChats.length - 1].text.trim();
-      finalChats[finalChats.length - 1] = { role: "b", text: t.length ? t : "(empty — try a lower temperature or more training)" };
+    const last = finalChats[finalChats.length - 1];
+    if (last?.role === "b" && !last.text.trim()) {
+      finalChats[finalChats.length - 1] = { role: "b", text: "(nothing useful yet — try more steps or lower temperature)" };
     }
-    this.emit({ chats: finalChats, generating: false });
+    this.set({ chats: finalChats, generating: false });
   }
 
   stopChat() {
     this.runId++;
-    this.emit({ generating: false });
+    this.set({ generating: false });
   }
 
   clearChat() {
-    this.emit({ chats: [] });
+    this.set({ chats: [] });
   }
 
-  async quickTrainNano() {
+  async quickTrain() {
     if (this.state.generating) return;
-    if (this.state.modelId !== "nano" || !this.model || this.state.step === 0) {
+    if (!this.model || this.state.modelId !== "nano" || this.state.step === 0) {
       await this.selectModel("nano");
-      this.set({ totalSteps: 2500, sampleEvery: 200 });
+      this.update({ totalSteps: 2500, sampleEvery: 500 });
     }
     await this.start();
   }
@@ -450,6 +459,7 @@ class Engine {
       model: this.state.modelId,
       spec: this.spec(),
       capMerges: this.capMerges(this.spec()),
+      dataset: this.state.datasetId,
       step: this.state.step,
       tokensSeen: this.state.tokensSeen,
       loss: this.state.loss,
@@ -463,7 +473,6 @@ class Engine {
     new Uint8Array(buf, 4, hb.length).set(hb);
     new Float32Array(buf, 4 + hb.length, w.length).set(w);
     this.log(`checkpoint exported — step ${this.state.step}, ${(buf.byteLength / 1048576).toFixed(1)} mb`);
-    this.emit();
     return new Blob([buf], { type: "application/octet-stream" });
   }
 
@@ -473,22 +482,22 @@ class Engine {
       const dv = new DataView(buf);
       const hlen = dv.getUint32(0, true);
       const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
-      if (header.magic !== "FORGE1") throw new Error("bad magic");
+      if (header.magic !== "FORGE1") throw new Error("not a forge checkpoint");
       this.runId++;
-      this.emit({ status: "preparing", statusText: "loading checkpoint", modelReady: false });
+      this.set({ status: "preparing", statusText: "loading checkpoint", modelReady: false });
       this.tokenizer.deserialize(header.tok);
-      this.state = { ...this.state, modelId: header.model };
-      await this.recap();
-      const spec = this.spec();
-      const vocab = this.tokenizer.vocabSize(header.capMerges);
-      this.model = new GPT(spec, vocab);
+      this.state = { ...this.state, modelId: header.model, datasetId: header.dataset ?? this.state.datasetId };
+      const cap = header.capMerges;
+      const vocab = this.tokenizer.vocabSize(cap);
+      this.ids = this.encodeSmart ? Uint32Array.from(this.encodeSmart(getDataset(this.state.datasetId).text, cap)) : new Uint32Array(0);
+      this.model = new GPT(this.spec(), vocab);
       const n = this.model.params.reduce((s, p) => s + p.d.length, 0);
-      const w = new Float32Array(buf, 4 + hlen, n);
-      this.model.loadPacked(w);
+      this.model.loadPacked(new Float32Array(buf, 4 + hlen, n));
       this.state = {
         ...this.state,
         vocabSize: vocab,
-        params: paramCount(spec, vocab),
+        corpusTokens: this.ids.length,
+        params: paramCount(this.spec(), vocab),
         step: header.step ?? 0,
         tokensSeen: header.tokensSeen ?? 0,
         loss: header.loss ?? NaN,
@@ -501,31 +510,21 @@ class Engine {
         mergeCount: this.tokenizer.merges.length,
       };
       this.emit();
-      this.log(`checkpoint loaded — ${header.model} @ step ${header.step}, loss ${(header.loss ?? NaN).toFixed?.(3)}`);
+      this.log(`checkpoint loaded — ${header.model} @ step ${header.step}, loss ${(header.loss ?? NaN).toFixed(3)}`);
       return true;
     } catch (e) {
       console.error(e);
-      this.log("failed to load checkpoint (wrong file?)");
-      this.emit({ status: stringOr(this.state.status, "idle"), modelReady: true });
+      this.log("couldn't load that file (not a forge checkpoint?)");
+      this.set({ status: "idle", statusText: "ready", modelReady: true });
       return false;
     }
   }
 }
 
-const TOK_USER = "<|user|>";
-const TOK_BOT = "<|bot|>";
-const TOK_END = "<|end|>";
-
-// The prefill loop already advanced the cache one extra step in preview();
-// this helper documents that we intentionally continue from that position.
-function newCacheWrap<T>(c: T): T { return c; }
-
 function fmtNum(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
   return n.toFixed(0);
 }
-
-function stringOr(s: string, d: string): any { return (s as any) || d; }
 
 export const engine = new Engine();
 export const DATASETS = () => getDatasets();
