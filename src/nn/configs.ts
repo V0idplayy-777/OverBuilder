@@ -28,7 +28,7 @@ export const MODELS: ModelSpec[] = [
   },
   {
     id: "micro", name: "Micro", tier: "~0.33M params",
-    d: 64, layers: 4, heads: 4, ctx: 96, vocabCap: 2048, trainCtx: 96,
+    d: 64, layers: 4, heads: 4, ctx: 96, vocabCap: 2048, trainCtx: 64,
     steps: 4000, lr: 2e-3, memGB: 0.05,
     blurb: "A small step up. Picks up multi-turn structure and simple facts.",
   },
