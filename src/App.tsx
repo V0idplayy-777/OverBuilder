@@ -1,133 +1,89 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { Cpu } from "lucide-react";
 import { engine } from "./engine";
 import { Sidebar } from "./ui/Sidebar";
 import { TrainView } from "./ui/TrainView";
 import { ChatView } from "./ui/ChatView";
 
-let initPromise: Promise<void> | null = null;
-
-function initEngine() {
-  if (!initPromise) {
-    initPromise = engine.init();
-  }
-  return initPromise;
+function Logo() {
+  return (
+    <div className="flex items-center gap-2.5">
+      <svg width="20" height="20" viewBox="0 0 16 16" className="flex-none">
+        <rect width="16" height="16" rx="3.5" fill="#17191d" stroke="#2e323a" strokeWidth="0.75" />
+        <rect x="3.25" y="3.25" width="4" height="4" fill="#e8a33d" />
+        <rect x="8.75" y="3.25" width="4" height="4" fill="#3a3f47" />
+        <rect x="3.25" y="8.75" width="4" height="4" fill="#3a3f47" />
+        <rect x="8.75" y="8.75" width="4" height="4" fill="#7fb881" />
+      </svg>
+      <div className="leading-none">
+        <div className="font-bold tracking-[0.18em] text-[13px]">FORGE</div>
+        <div className="text-[9.5px] text-dim tracking-wide mt-0.5">in-browser transformer lab</div>
+      </div>
+    </div>
+  );
 }
 
-export default function App() {
-  const state = useSyncExternalStore(
-    engine.subscribe,
-    engine.getSnapshot,
-    engine.getSnapshot
-  );
+function StatusDot({ status }: { status: string }) {
+  const color =
+    status === "training" ? "bg-accent animate-pulse" :
+    status === "done" ? "bg-good" :
+    status === "preparing" ? "bg-accent animate-pulse" :
+    status === "error" ? "bg-bad" :
+    status === "paused" ? "bg-fog" : "bg-edge2";
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${color}`} />;
+}
 
+let didBoot = false;
+
+export default function App() {
+  const s = useSyncExternalStore(engine.subscribe, engine.getSnapshot);
   const [tab, setTab] = useState<"train" | "chat">("train");
 
   useEffect(() => {
-    initEngine().catch((error) => {
-      console.error(error);
-    });
+    if (didBoot) return;
+    didBoot = true;
+    engine.init();
   }, []);
 
-  const statusLabel =
-    state.status === "preparing"
-      ? state.statusText
-      : state.status === "training"
-        ? `training · step ${state.step.toLocaleString()} / ${state.totalSteps.toLocaleString()}`
-        : state.status === "done"
-          ? "training complete"
-          : state.status === "paused"
-            ? "paused"
-            : state.status === "error"
-              ? "error"
-              : state.statusText;
+  const fmtParams = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : String(n));
 
   return (
-    <div className="min-h-screen h-screen bg-[#0b0d0f] text-[#e8eaed] flex flex-col overflow-hidden">
-      <header className="h-12 flex-none border-b border-[#1e2126] bg-[#111315] flex items-center justify-between px-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-7 h-7 rounded-md bg-[#e8a33d] flex items-center justify-center text-[#0b0d0f] font-black text-sm">
-            F
-          </div>
-
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="font-semibold tracking-tight text-[14px]">
-              Forge
-            </span>
-            <span className="text-[#5c6470] text-[12px]">/</span>
-            <span className="font-mono text-[11px] text-[#8b929c] truncate">
-              local language model lab
-            </span>
-          </div>
+    <div className="h-full flex flex-col">
+      {/* top bar */}
+      <header className="flex-none h-12 border-b border-edge bg-panel flex items-center px-4 gap-4">
+        <Logo />
+        <div className="seg ml-2">
+          <button className={tab === "train" ? "active" : ""} onClick={() => setTab("train")}>Train</button>
+          <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>Chat</button>
         </div>
-
-        <div className="flex items-center gap-3">
-          <div className="hidden sm:flex items-center gap-2 text-[10px] font-mono text-[#8b929c]">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                state.kernel === "wasm"
-                  ? "bg-emerald-400"
-                  : state.kernel === "js"
-                    ? "bg-amber-400"
-                    : "bg-[#5c6470]"
-              }`}
-            />
-            {state.kernel === "wasm"
-              ? "wasm"
-              : state.kernel === "js"
-                ? "javascript"
-                : "booting"}
-          </div>
-
-          <div className="text-[10px] font-mono text-[#5c6470]">
-            {statusLabel}
-          </div>
+        <div className="flex-1" />
+        <div className="hidden md:flex items-center gap-4 font-mono text-[11px] text-fog tabular">
+          <span className="flex items-center gap-1.5">
+            <StatusDot status={s.status} />
+            {s.statusText}
+          </span>
+          <span className="hidden lg:inline">{s.params ? `${fmtParams(s.params)} params` : "—"}</span>
+          <span className="hidden lg:inline">{s.tokPerSec ? `${(s.tokPerSec / 1000).toFixed(1)}k tok/s` : ""}</span>
+          <span className={`chip ${s.kernel === "wasm" ? "green" : ""}`}>
+            <Cpu size={9} strokeWidth={2.5} />
+            {s.kernel === "boot" ? "…" : s.kernel}
+          </span>
         </div>
       </header>
 
-      <div className="h-10 flex-none border-b border-[#1e2126] bg-[#0f1113] flex items-center px-3">
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setTab("train")}
-            className={`px-3 py-1.5 rounded-md text-[11px] font-mono transition-colors ${
-              tab === "train"
-                ? "bg-[#1e2126] text-[#e8eaed]"
-                : "text-[#5c6470] hover:text-[#aeb4bc]"
-            }`}
-          >
-            train
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTab("chat")}
-            className={`px-3 py-1.5 rounded-md text-[11px] font-mono transition-colors ${
-              tab === "chat"
-                ? "bg-[#1e2126] text-[#e8eaed]"
-                : "text-[#5c6470] hover:text-[#aeb4bc]"
-            }`}
-          >
-            chat
-          </button>
-        </div>
-
-        <div className="ml-auto flex items-center gap-4 text-[10px] font-mono text-[#5c6470]">
-          <span>
-            {state.modelId} · {state.params ? state.params.toLocaleString() : "—"} params
-          </span>
-          <span className="hidden md:inline">
-            {state.vocabSize ? `${state.vocabSize.toLocaleString()} vocab` : "vocab —"}
-          </span>
-        </div>
+      {/* body */}
+      <div className="flex-1 min-h-0 flex">
+        <Sidebar s={s} />
+        <main className="flex-1 min-w-0 flex flex-col min-h-0 bg-ink">
+          {tab === "train" ? <TrainView s={s} /> : <ChatView s={s} />}
+        </main>
       </div>
 
-      <main className="flex-1 min-h-0 flex">
-        <Sidebar s={state} />
-
-        <section className="flex-1 min-w-0 min-h-0 flex">
-          {tab === "train" ? <TrainView s={state} /> : <ChatView s={state} />}
-        </section>
-      </main>
+      {/* footer */}
+      <footer className="flex-none h-7 border-t border-edge bg-panel flex items-center justify-between px-4 text-[10px] font-mono text-dim">
+        <span>forge v0.3 · wat-compiled sgemm · bpe tokenizer · adamw + cosine · kv-cached decoding</span>
+        <span className="hidden sm:inline">no servers, no apis — every gradient runs in this tab</span>
+      </footer>
     </div>
   );
 }
