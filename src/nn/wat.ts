@@ -36,11 +36,10 @@ export const WAT_SOURCE = `
     (local.set $N4 (i32.shl (local.get $N) (i32.const 2)))
     (local.set $i (i32.const 0))
     (loop $li
-      ;; pA0 = a + i*K*4 ; pA1 = pA0 + K*4
-      (local.set $pA0 (i32.add (local.get $pa) (i32.mul (local.get $i) (local.get $K4))))
-      (local.set $pA1 (i32.add (local.get $pA0) (local.get $K4)))
       (local.set $j (i32.const 0))
       (loop $lj
+        (local.set $pA0 (i32.add (local.get $pa) (i32.mul (local.get $i) (local.get $K4))))
+        (local.set $pA1 (i32.add (local.get $pA0) (local.get $K4)))
         ;; pC = c + (i*N + j)*4
         (local.set $pC (i32.add (local.get $pc)
           (i32.shl (i32.add (i32.mul (local.get $i) (local.get $N)) (local.get $j)) (i32.const 2))))
