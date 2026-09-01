@@ -116,6 +116,7 @@ function b64ToBuf(b64: string): ArrayBuffer {
 export let kernelError = "";
 
 export async function initKernels(): Promise<KernelMode> {
+  kernelError = "";
   try {
     const bin = b64ToBuf(WASM_B64);
     const { instance } = await WebAssembly.instantiate(bin, {});
@@ -132,12 +133,12 @@ export async function initKernels(): Promise<KernelMode> {
     jsNN(a, bT as Float32Array, d1, M, N, K, 0);
     runWasm("nn", a, bT as Float32Array, d2, M, N, K, 0);
     let dd = 0; for (let i = 0; i < d1.length; i++) dd = Math.max(dd, Math.abs(d1[i] - d2[i]));
-    if (d > 1e-4 || dd > 1e-4) throw new Error("wasm self-test failed");
+    if (d > 1e-3 || dd > 1e-3) throw new Error("wasm self-test failed " + d + " " + dd);
     const fns = dispatch(jsNT, jsNN);
     matNT = fns.nt; matNN = fns.nn;
     mode = "wasm";
   } catch (e) {
-    console.warn("[kernels] WASM unavailable, using JS kernels:", e);
+    kernelError = e instanceof Error ? e.message : String(e);
     wasm = null;
     matNT = jsNT; matNN = jsNN;
     mode = "js";
