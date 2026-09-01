@@ -70,7 +70,7 @@ const need = (t: Tensor, fill = true): Float32Array => {
 // ---------------------------------------------------------------- ops
 
 function linear(tape: Tape, x: Tensor, w: Param, T: number, outDim: number, inDim: number): Tensor {
-  const out: Tensor = { d: new Float32Array(T * outDim), g: null };
+  const out: Tensor = { d: f32(T * outDim), g: null };
   matNT(x.d, w.d, out.d, T, outDim, inDim, 0); // y = x w^T
   tape.push(() => {
     const dy = out.g!;
