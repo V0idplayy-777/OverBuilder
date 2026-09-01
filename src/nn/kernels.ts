@@ -142,7 +142,6 @@ export async function initKernels(): Promise<KernelMode> {
   }
   return mode;
 }
-}
 
 // matrix-vector product for single-token decode (memory-bound; JS is ideal)
 export function matVec(x: Float32Array, w: Float32Array, out: Float32Array, outDim: number, inDim: number) {
