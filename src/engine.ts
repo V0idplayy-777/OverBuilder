@@ -289,21 +289,17 @@ class Engine {
         const gnorm = this.model!.clipGrads(1.0);
         this.model!.adamw(lr, 0.1);
         const ema = isNaN(this.state.loss) ? loss : this.state.loss * 0.98 + loss * 0.02;
-        const series = this.state.lossSeries.length > 6000
-          ? [...this.state.lossSeries.slice(3000), loss]
-          : [...this.state.lossSeries, loss];
-        this.state = {
-          ...this.state,
-          step: this.state.step + 1,
-          loss: ema,
-          lossSeries: series,
-          tokensSeen: this.state.tokensSeen + T,
-          gnorm,
-          lr,
-        };
+        const series = this.state.lossSeries;
+        series.push(loss);
+        if (series.length > 6000) series.splice(0, 3000);
+        this.state.step += 1;
+        this.state.loss = ema;
+        this.state.tokensSeen += T;
+        this.state.gnorm = gnorm;
+        this.state.lr = lr;
         stepsInSlice++;
         tokensInSlice += T;
-      } while (performance.now() - sliceStart < 28);
+      } while (performance.now() - sliceStart < 50);
 
       const sliceMs = Math.max(0.5, performance.now() - sliceStart);
       const tps = (tokensInSlice / sliceMs) * 1000;
