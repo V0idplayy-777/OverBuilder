@@ -46,10 +46,23 @@ export interface Param {
 export interface Tensor { d: Float32Array; g: Float32Array | null; }
 type Tape = Array<() => void>;
 
+let arena = new Float32Array(1 << 20);
+let ap = 0;
+function f32(n: number): Float32Array {
+  if (ap + n > arena.length) {
+    const next = new Float32Array(Math.max(arena.length * 2, ap + n + 4096));
+    next.set(arena.subarray(0, ap));
+    arena = next;
+  }
+  const v = arena.subarray(ap, ap + n);
+  ap += (n + 7) & ~7;
+  return v;
+}
+
 const need = (t: Tensor, fill = true): Float32Array => {
   if (!t.g) {
-    t.g = new Float32Array(t.d.length);
-    if (!fill) return t.g;
+    t.g = f32(t.d.length);
+    if (fill) t.g.fill(0);
   }
   return t.g;
 };
